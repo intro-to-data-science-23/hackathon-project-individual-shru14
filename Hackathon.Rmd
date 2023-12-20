@@ -1,0 +1,171 @@
+---
+title: "Hackathon  1.2"
+author: "Shruti Kakade"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1.1 Interactive map of survey entries
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(haven)
+library(sf)
+library(leaflet)
+library(leaflet.extras)  # Make sure to have this package installed
+# read the survey file
+usa_survey <- readRDS("survey/meof_usa_survey_df.rds")
+
+# only keep the necessary columns
+usa_survey_clean <- usa_survey %>% 
+  select(wave, personid, inputstate)
+
+# group by states and get the count of people
+usa_survey_clean <- usa_survey_clean %>%
+  filter (!is.na(inputstate)) %>% 
+  group_by(inputstate) %>%
+  summarise(personid = n()) 
+
+#change the state codes to state names
+usa_survey_clean$inputstate <- haven::as_factor(usa_survey_clean$inputstate)
+
+#(shapefile downloaded from public.opendatasoft.com- link in the readme file)
+# Let's read the jeoJson file that is stored on the web with the geojsonio library:
+usa_boundaries_shp <- st_read("https://rstudio.github.io/leaflet/json/us-states.geojson")
+
+#rename the state column in the shapefile to match the survey data
+usa_boundaries_shp <- usa_boundaries_shp %>% rename(inputstate = name)
+
+# Merge the shapefile with the survey data using state column
+usa_merge <- left_join(usa_boundaries_shp, usa_survey_clean, by = "inputstate") 
+
+#rearrage the columns for convenience
+usa_merge <- usa_merge %>% select(inputstate, personid, everything())
+
+# Create a leaflet basemap and tiles from Open Street Map
+map_usa <- leaflet(usa_boundaries_shp) %>%
+  addProviderTiles("OpenStreetMap.Mapnik") %>%
+  setView(lng = -98, lat = 39, zoom = 4) 
+usa_merge$personid <- as.numeric(as.character(usa_merge$personid))
+
+
+# Check and convert 'personid' to numeric if needed
+usa_merge$personid <- as.numeric(as.character(usa_merge$personid))
+
+# Check for missing values and handle them if necessary
+usa_merge$personid[is.na(usa_merge$personid)] <- 0  # Replace NAs with 0 or any other suitable value
+
+# Specify the color palette manually with a defined range
+pal <- colorNumeric(
+  palette = "YlOrRd",
+  domain = usa_merge$personid,
+  na.color = "grey"  # Specify a color for missing values
+)
+#pal <- colorNumeric("YlOrRd", domain = usa_merge$personid)
+map_usa <- map_usa %>%
+  addPolygons(
+    data = usa_merge,
+    
+    fillColor = ~pal(personid),  # fill color
+    fillOpacity = 1,    # fill opacity
+    
+    color = "black",    # border color
+    weight = 0.5,       # border weight
+    opacity = 0.5,      # border opacity
+    
+    popup = ~paste("Total survey responses for ", inputstate, ": ", personid),
+    
+  ) %>% 
+  
+  addLegend(pal = pal,
+    values = ~usa_merge$personid,
+    title = "Survey Response Count",
+    opacity = 1
+  )
+print(map_usa)
+
+```
+
+## 1.2 Writing a function to explore the distribution of answers for a given question on each of the survey waves
+
+```{r}
+# Load necessary packages
+library(dplyr)
+library(ggplot2)
+library(sjlabelled)
+library(forcats)
+
+# Load the survey dataset
+usa_survey <- readRDS("survey/meof_usa_survey_df.rds")
+
+# Function to generate barplots for the distribution of responses
+distribution <- function(data, survey_item, relative = TRUE, absolute = FALSE) {
+  # Check if the variable is of type <dbl+lbl>
+  if (!inherits(data[[survey_item]], "haven_labelled")) {
+    stop(paste("Input variable", survey_item, "must be a labelled type."))
+  }
+
+  # Create a data frame for plotting
+  plot_data <- data %>%
+  group_by(wave, !!rlang::sym(survey_item)) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  mutate(answer = sjlabelled::as_label(!!rlang::sym(survey_item)))
+
+  # Calculate relative shares if specified
+  if (relative) {
+    plot_data <- plot_data %>%
+      group_by(wave) %>%
+      mutate(percentage = count / sum(count) * 100)
+  }
+
+  # Add absolute counts if specified
+  if (absolute) {
+    plot_data <- plot_data %>%
+      group_by(wave, answer) %>%
+      mutate(abs_count = sum(count))
+  }
+
+  # Convert to factor using forcats
+  plot_data$answer <- forcats::fct_reorder(plot_data$answer, plot_data$count, .desc = TRUE)
+
+  # Create a dynamic color palette based on unique responses
+  unique_responses <- unique(plot_data$answer)
+  color_mapping <- setNames(scales::hue_pal()(length(unique_responses)), unique_responses)
+
+  # Create the plot
+  plot_data$voi <- ifelse(relative, plot_data$percentage, plot_data$abs_count)
+
+  # Use ggplot2's ifelse to dynamically set the y-axis label
+  y_label <- ifelse(relative, "Percentage of Respondents", "Count of Respondents")
+
+  # Create ggplot
+  ggplot(plot_data, aes(x = answer, y = voi, fill = answer)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = color_mapping, name = sjlabelled::get_label(data[[survey_item]])) +
+    facet_wrap(~ wave, scales = "free_y") +
+    labs(
+      title = if (absolute) {
+        paste("Distribution of", sjlabelled::get_label(data[[survey_item]]), "across Survey Waves (Absolute Counts)")
+      } else {
+        paste("Distribution of", sjlabelled::get_label(data[[survey_item]]), "across Survey Waves (1-8)")
+      },
+      x = NULL,
+      y = y_label,
+      caption = "Data Source: Media Exposure and Opinion Formation (2018-19), Waves 1-8"
+    ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+# Example usage of the function for different survey items and settings
+distribution(usa_survey, "educ", relative = TRUE, absolute = TRUE)
+distribution(usa_survey, "race", relative = TRUE, absolute = FALSE)
+distribution(usa_survey, "presvote16post", relative = FALSE, absolute = TRUE)
+
+
+```
